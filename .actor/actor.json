@@ -1,9 +1,14 @@
 {
+  "actorSpecification": 1,
   "name": "smart-contractor-crawler",
   "title": "Smart Contractor Web Crawler",
   "description": "High-speed content crawler that extracts readable text, title, and meta data from multiple websites simultaneously. Inspired by Fast Website Content Crawler.",
   "version": "1.0.0",
   "buildTag": "latest",
-  "env": { "APIFY_MEMORY_MBYTES": "2048" },
-  "input": "./input_schema.json"
+  "defaultRunOptions": {
+    "memoryMbytes": 2048
+  },
+  "input": "./input_schema.json",
+  "dockerfile": "./Dockerfile"
 }
+
