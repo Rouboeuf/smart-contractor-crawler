@@ -1,51 +1,51 @@
-import { CheerioCrawler, Dataset, log } from 'crawlee';
-import Apify from 'apify';
+import { Actor } from 'apify';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 
-log.setLevel(log.LEVELS.INFO);
+await Actor.init();
 
-Apify.main(async () => {
-  const input = await Apify.getInput();
-  const { startUrls = [], maxConcurrency = 10 } = input || {};
+const input = await Actor.getInput() || {
+    startUrls: ["https://example.com"]
+};
 
-  if (!startUrls.length) {
-    throw new Error('No startUrls provided.');
-  }
+const results = [];
 
-  const crawler = new CheerioCrawler({
-    maxConcurrency,
-    requestHandlerTimeoutSecs: 60,
-    async requestHandler({ request, $, response }) {
-      const title = $('title').text().trim();
-      const metaDesc = $('meta[name="description"]').attr('content') || '';
-      const text = $('body').text().replace(/\s+/g, ' ').trim();
+for (const url of input.startUrls) {
+    try {
+        console.log(`Scraping: ${url}`);
 
-      const emails = Array.from(
-        new Set((text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []))
-      );
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
 
-      const phones = Array.from(
-        new Set((text.match(/(?:\+\d{1,2}\s?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})/g) || []))
-      );
+        const $ = cheerio.load(response.data);
 
-      await Dataset.pushData({
-        url: request.loadedUrl,
-        statusCode: response?.statusCode || null,
-        title,
-        metaDesc,
-        emails,
-        phones,
-        textSnippet: text.slice(0, 600)
-      });
+        const title = $('title').text().trim();
+        const html = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 2000); // First 2000 chars of text
 
-      log.info(`✅ Scraped: ${request.loadedUrl}`);
-    },
-    failedRequestHandler({ request }) {
-      log.error(`❌ Failed: ${request.url}`);
-    },
-  });
+        // Extract emails + phones
+        const emails = [...new Set(response.data.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g))];
+        const phones = [...new Set(response.data.match(/\+?\d[\d\s().-]{8,}\d/g))];
 
-  await crawler.run(startUrls);
-  log.info('🎉 Done.');
-});
+        results.push({
+            url,
+            title,
+            emails,
+            phones,
+            textSample: html
+        });
+
+        await Actor.pushData({ url, title, emails, phones, textSample: html });
+
+    } catch (err) {
+        console.error(`❌ Failed to scrape ${url}: ${err.message}`);
+    }
+}
+
+console.log("✅ Done scraping all URLs!");
+await Actor.exit();
+
 
 
