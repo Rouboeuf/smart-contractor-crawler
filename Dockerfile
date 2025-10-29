@@ -1,11 +1,9 @@
 FROM apify/actor-node-playwright:latest
 
-# Copy your code into the container
+# Copy all files into container
 COPY . ./
 
-# Install dependencies only if a package.json exists
-RUN if [ -f package.json ]; then npm install --omit=dev; fi
-
-# Run main.js directly instead of "npm start"
+# Force bypass npm scripts — we’ll run main.js directly
 CMD ["node", "main.js"]
+
 
