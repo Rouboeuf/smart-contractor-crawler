@@ -1,136 +1,216 @@
-import { Actor } from 'apify';
+import { Actor, log } from 'apify';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import http from 'node:http';
+import https from 'node:https';
 
-// ✅ Ignore SSL certificate errors (expired, self-signed, or invalid)
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+// ---- Global: allow invalid certs but keep it scoped via agent (safer than env var) ----
+const httpsAgent = new https.Agent({ keepAlive: true, rejectUnauthorized: false });
+const httpAgent  = new http.Agent({  keepAlive: true });
 
-await Actor.init();
-
-const input = await Actor.getInput() || {
-    startUrls: ["https://example.com"]
+const AXIOS_DEFAULTS = {
+  timeout: 25000,
+  maxRedirects: 5,
+  decompress: true,
+  validateStatus: (s) => s >= 200 && s < 400,
+  headers: {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+  },
 };
 
-// --- Utility: validate real business sites ---
-function isValidBusinessPage(html, text) {
-    if (!html || html.length < 500 || !text || text.length < 100) return false;
+// ----------------------- helpers -----------------------
+const normalizeUrl = (u) => {
+  let s = String(u).trim();
+  if (!s) return null;
 
-    const lower = text.toLowerCase();
-    const spamIndicators = [
-        "domain for sale", "buy this domain", "godaddy", "namecheap",
-        "parking page", "website coming soon", "not found", "404",
-        "this domain is available", "search for domains", "suspended page"
-    ];
-    return !spamIndicators.some(keyword => lower.includes(keyword));
+  // remove spaces, ensure hostname
+  if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
+  try {
+    // normalize trailing slashes etc.
+    const url = new URL(s);
+    // drop anchors
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return null;
+  }
+};
+
+// Try https -> http fallback. Also return origin for building absolute links.
+async function fetchWithFallback(raw) {
+  // If caller passed http or https explicitly, respect it but still fallback to the other.
+  const preferHttps = !/^http:\/\//i.test(raw);
+
+  const urls = preferHttps ? [raw, raw.replace(/^https:\/\//i, 'http://')] :
+                             [raw, raw.replace(/^http:\/\//i, 'https://')];
+
+  let lastErr;
+  for (const url of urls) {
+    try {
+      const isHttps = url.startsWith('https://');
+      const res = await axios.get(url, {
+        ...AXIOS_DEFAULTS,
+        httpAgent,
+        httpsAgent,
+      });
+      const finalUrl = res.request?.res?.responseUrl || url;
+      const origin = new URL(finalUrl).origin;
+      return { url: finalUrl, origin, html: String(res.data || '') };
+    } catch (e) {
+      lastErr = e;
+      log.warning(`Fetch failed ${url}: ${e.message}`);
+    }
+  }
+  throw lastErr || new Error('Unknown fetch error');
 }
 
-// --- Function to scrape one page ---
+// far safer parked/invalid heuristic (very loose)
+function isProbablyParked(html, text) {
+  if (!html || html.length < 200) return true; // almost empty
+  const t = (text || '').toLowerCase();
+
+  // if site actually shows real business cues, consider valid
+  const hasBusinessCues =
+    /contact|services|service|about|gallery|projects|estimate|quote|testimonials|our team|call\s*\(?\d/i.test(t);
+
+  // parking/registrar cues
+  const parkedCues =
+    /buy this domain|domain for sale|this domain is available|sedo|godaddy|namecheap|parking|coming soon/i.test(t);
+
+  if (parkedCues && !hasBusinessCues) return true;
+  return false;
+}
+
+function extractTextAndMeta(html) {
+  const $ = cheerio.load(html, { decodeEntities: true });
+  $('script,style,noscript,iframe,svg,canvas').remove();
+  const text = $('body').text().replace(/\s+/g, ' ').trim();
+  const title = ($('title').first().text() || '').trim();
+  const emails = [...new Set((html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []))];
+  const phones = [
+    ...new Set((text.match(/\+?\d[\d\s().-]{8,}\d/g) || []).map((p) => p.trim())),
+  ];
+  return { $, text, title, emails, phones };
+}
+
+function absolutizeHref(href, origin) {
+  if (!href) return null;
+  if (href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('#')) return null;
+  if (href.startsWith('javascript:')) return null;
+  try {
+    if (/^https?:\/\//i.test(href)) {
+      const u = new URL(href);
+      return u.origin === origin ? u.toString() : null; // keep internal only
+    }
+    const u = new URL(href.startsWith('/') ? href : `/${href}`, origin);
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+// ----------------------- page scraping -----------------------
 async function scrapePage(url) {
-    try {
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent':
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            },
-            timeout: 20000,
-        });
+  const { url: finalUrl, origin, html } = await fetchWithFallback(url);
+  const { $, text, title, emails, phones } = extractTextAndMeta(html);
 
-        const html = response.data;
-        const $ = cheerio.load(html);
-        $('script, style, noscript, iframe').remove();
-
-        const text = $('body').text().replace(/\s+/g, ' ').trim();
-        const title = $('title').text().trim();
-        const emails = [...new Set(html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g))];
-        const phones = [...new Set(html.match(/\+?\d[\d\s().-]{8,}\d/g))];
-
-        // Validate real page
-        const valid = isValidBusinessPage(html, text);
-
-        return { url, html, text, title, emails, phones, valid };
-    } catch (err) {
-        console.error(`❌ Error scraping ${url}: ${err.message}`);
-        return null;
-    }
+  const parked = isProbablyParked(html, text);
+  return {
+    finalUrl,
+    origin,
+    html,
+    text,
+    title,
+    emails,
+    phones,
+    parked,
+    $,
+  };
 }
 
-// --- Function to scrape homepage + subpages ---
-async function scrapeCompany(baseUrl) {
-    const base = new URL(baseUrl).origin;
-    const mainPage = await scrapePage(baseUrl);
-    if (!mainPage || !mainPage.valid) {
-        console.log(`⚠️ Skipping ${baseUrl} (invalid or parked domain)`);
-        return;
+function pickRelevantInternalLinks($, origin, max = 3) {
+  const wanted = ['about', 'service', 'services', 'contact', 'gallery', 'project', 'projects', 'team'];
+  const links = new Set();
+
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href');
+    const abs = absolutizeHref(href, origin);
+    if (!abs) return;
+    const low = abs.toLowerCase();
+    if (wanted.some((w) => low.includes(`/${w}`))) links.add(abs);
+  });
+
+  return [...links].slice(0, max);
+}
+
+// ----------------------- main flow -----------------------
+await Actor.init();
+
+const input = (await Actor.getInput()) || {};
+const startUrls = (input.startUrls || []).map(normalizeUrl).filter(Boolean);
+
+if (!startUrls.length) {
+  log.warning('No startUrls provided. Add them in Actor input.');
+}
+
+for (const start of startUrls) {
+  try {
+    const home = await scrapePage(start);
+
+    if (home.parked) {
+      // STILL try to continue: some “minimal” sites look small but are real.
+      log.warning(`"${start}" looks minimal/parked. Continuing cautiously...`);
     }
 
-    const allText = [mainPage.text];
-    const allHtml = [mainPage.html];
-    const uniqueEmails = new Set(mainPage.emails || []);
-    const uniquePhones = new Set(mainPage.phones || []);
+    // find up to 3 relevant internal pages
+    const subLinks = pickRelevantInternalLinks(home.$, home.origin, 3);
 
-    // Find relevant internal pages
-    let subpages = [];
-    try {
-        const response = await axios.get(baseUrl, { timeout: 20000 });
-        const $ = cheerio.load(response.data);
-        subpages = $('a[href]')
-            .map((i, el) => $(el).attr('href'))
-            .get()
-            .filter(href =>
-                href &&
-                !href.startsWith('#') &&
-                !href.startsWith('mailto:') &&
-                !href.includes('.pdf') &&
-                !href.includes('wp-') &&
-                (href.includes('about') ||
-                 href.includes('service') ||
-                 href.includes('contact') ||
-                 href.includes('project') ||
-                 href.includes('gallery') ||
-                 href.includes('team'))
-            )
-            .map(href =>
-                href.startsWith('http')
-                    ? href
-                    : `${base}${href.startsWith('/') ? href : '/' + href}`
-            )
-            .slice(0, 3);
-    } catch (err) {
-        console.log(`⚠️ Could not extract subpages for ${baseUrl}: ${err.message}`);
-    }
+    const gatheredTexts = [home.text];
+    const gatheredHtml = [home.html];
+    const emails = new Set(home.emails || []);
+    const phones = new Set(home.phones || []);
 
-    // Scrape up to 3 subpages
-    for (const link of subpages) {
+    for (const link of subLinks) {
+      try {
         const sub = await scrapePage(link);
-        if (sub && sub.valid) {
-            allText.push(sub.text);
-            (sub.emails || []).forEach(e => uniqueEmails.add(e));
-            (sub.phones || []).forEach(p => uniquePhones.add(p));
+        if (!sub.parked) {
+          gatheredTexts.push(sub.text);
+          gatheredHtml.push(`<!-- ${link} -->\n${sub.html}`);
+          (sub.emails || []).forEach((e) => emails.add(e));
+          (sub.phones || []).forEach((p) => phones.add(p));
         }
+      } catch (e) {
+        log.warning(`Subpage failed ${link}: ${e.message}`);
+      }
     }
 
-    // Merge text & output
-    const combinedText = allText.join(' ').replace(/\s+/g, ' ').trim();
+    const combinedText = gatheredTexts.join(' ').replace(/\s+/g, ' ').trim();
+    const combinedHtml = gatheredHtml.join('\n\n');
 
-    const result = {
-        company_url: baseUrl,
-        title: mainPage.title,
-        html: mainPage.html,
-        text: combinedText,
-        emails: [...uniqueEmails],
-        phones: [...uniquePhones],
-        subpages_scraped: subpages.length,
-        status: 'scraped_ok',
-    };
+    await Actor.pushData({
+      company_url: start,
+      title: home.title,
+      html: combinedHtml,           // full HTML: home + subpages (annotated)
+      text: combinedText,           // combined clean text
+      emails: [...emails],
+      phones: [...phones],
+      subpages_scraped: subLinks.length,
+      status: 'ok',
+    });
 
-    await Actor.pushData(result);
-    console.log(`✅ Scraped ${baseUrl} (${subpages.length} extra pages)`);
-}
+    log.info(`✅ Scraped ${start} (+${subLinks.length} subpages)`);
 
-// --- Run for all start URLs ---
-for (const url of input.startUrls) {
-    await scrapeCompany(url);
+  } catch (e) {
+    log.error(`❌ Failed ${start}: ${e.message}`);
+    await Actor.pushData({
+      company_url: start,
+      status: 'error',
+      error: e.message,
+    });
+  }
 }
 
 await Actor.exit();
