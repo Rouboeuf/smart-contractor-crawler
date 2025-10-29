@@ -1,0 +1,10 @@
+{
+  "name": "smart-contractor-crawler",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "apify": "^3.0.0",
+    "cheerio": "^1.0.0-rc.12",
+    "node-fetch": "^3.3.2"
+  }
+}
