@@ -1,17 +1,25 @@
 {
-  "title": "Smart Contractor Crawler",
+  "title": "Smart Contractor Crawler Input",
   "type": "object",
+  "schemaVersion": 1,
   "properties": {
     "startUrls": {
-      "title": "List of URLs",
+      "title": "Start URLs",
       "type": "array",
-      "editor": "requestListSources"
+      "description": "List of website URLs to scrape (homepage or list).",
+      "editor": "stringList",
+      "prefill": [
+        "https://www.abgbuilds.com",
+        "https://www.aboltinc.com"
+      ]
     },
     "maxConcurrency": {
-      "title": "Concurrent requests",
+      "title": "Max Concurrency",
       "type": "integer",
-      "default": 20
+      "description": "Number of pages to scrape in parallel.",
+      "default": 10
     }
   },
   "required": ["startUrls"]
 }
+
