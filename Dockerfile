@@ -1,10 +1,11 @@
 FROM apify/actor-node-playwright:latest
 
-# Copy everything
+# Copy your code into the container
 COPY . ./
 
-# Install dependencies
-RUN npm install --omit=dev
+# Install dependencies only if a package.json exists
+RUN if [ -f package.json ]; then npm install --omit=dev; fi
 
-# Run the scraper
-CMD ["npm", "start"]
+# Run main.js directly instead of "npm start"
+CMD ["node", "main.js"]
+
