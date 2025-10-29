@@ -2,6 +2,9 @@
   "name": "smart-contractor-crawler",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "start": "node main.js"
+  },
   "dependencies": {
     "apify": "^3.0.0",
     "cheerio": "^1.0.0-rc.12",
