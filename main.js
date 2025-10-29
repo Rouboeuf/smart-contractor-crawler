@@ -8,54 +8,45 @@ const input = await Actor.getInput() || {
     startUrls: ["https://example.com"]
 };
 
-const visited = new Set();
-const results = [];
-
-// Helper to fetch and extract text + html
 async function scrapePage(url) {
-    if (visited.has(url)) return;
-    visited.add(url);
+    try {
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
+            timeout: 20000
+        });
 
-    console.log(`🕷 Scraping: ${url}`);
-    const response = await axios.get(url, {
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        },
-        timeout: 15000
-    });
+        const html = response.data;
+        const $ = cheerio.load(html);
+        $('script, style, noscript, iframe').remove();
 
-    const html = response.data;
-    const $ = cheerio.load(html);
+        const text = $('body').text().replace(/\s+/g, ' ').trim();
+        const title = $('title').text().trim();
+        const emails = [...new Set(html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g))];
+        const phones = [...new Set(html.match(/\+?\d[\d\s().-]{8,}\d/g))];
 
-    // Remove script/style/meta tags
-    $('script, style, noscript, meta, iframe').remove();
-
-    const cleanText = $('body').text()
-        .replace(/\s+/g, ' ')
-        .replace(/<!--.*?-->/g, '')
-        .trim();
-
-    // Extract contact info
-    const emails = [...new Set(html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g))];
-    const phones = [...new Set(html.match(/\+?\d[\d\s().-]{8,}\d/g))];
-
-    return { url, title: $('title').text().trim(), html, text: cleanText, emails, phones };
+        return { url, html, text, title, emails, phones };
+    } catch (err) {
+        console.error(`❌ Error scraping ${url}: ${err.message}`);
+        return null;
+    }
 }
 
-// Crawl home + key subpages
-for (const startUrl of input.startUrls) {
-    try {
-        const base = new URL(startUrl).origin;
-        const mainPage = await scrapePage(startUrl);
-        if (mainPage) {
-            results.push(mainPage);
-            await Actor.pushData(mainPage);
-        }
+async function scrapeCompany(baseUrl) {
+    const base = new URL(baseUrl).origin;
+    const mainPage = await scrapePage(baseUrl);
+    if (!mainPage) return;
 
-        // Crawl internal links that include common business pages
-        const response = await axios.get(startUrl);
+    const allText = [mainPage.text];
+    const allHtml = [mainPage.html]; // keep homepage HTML only once
+
+    // find internal pages
+    let subpages = [];
+    try {
+        const response = await axios.get(baseUrl);
         const $ = cheerio.load(response.data);
-        const links = $('a[href]')
+        subpages = $('a[href]')
             .map((i, el) => $(el).attr('href'))
             .get()
             .filter(href =>
@@ -63,28 +54,46 @@ for (const startUrl of input.startUrls) {
                 !href.startsWith('#') &&
                 !href.startsWith('mailto:') &&
                 !href.includes('.pdf') &&
-                !href.startsWith('tel:') &&
+                !href.includes('wp-') &&
                 (href.includes('about') ||
+                 href.includes('service') ||
                  href.includes('contact') ||
-                 href.includes('services') ||
-                 href.includes('team') ||
-                 href.includes('company'))
+                 href.includes('project') ||
+                 href.includes('gallery') ||
+                 href.includes('team'))
             )
-            .map(href => href.startsWith('http') ? href : `${base}${href.startsWith('/') ? href : '/' + href}`);
-
-        // Limit to 5 extra pages per site
-        for (const link of links.slice(0, 5)) {
-            const subPage = await scrapePage(link);
-            if (subPage) {
-                results.push(subPage);
-                await Actor.pushData(subPage);
-            }
-        }
-
+            .map(href => href.startsWith('http') ? href : `${base}${href.startsWith('/') ? href : '/' + href}`)
+            .slice(0, 3); // only first 3 relevant pages
     } catch (err) {
-        console.error(`❌ Error scraping ${startUrl}: ${err.message}`);
+        console.log(`⚠️ Could not extract subpages for ${baseUrl}: ${err.message}`);
     }
+
+    // scrape subpages
+    for (const link of subpages) {
+        const sub = await scrapePage(link);
+        if (sub) allText.push(sub.text);
+    }
+
+    const combinedText = allText.join(' ').replace(/\s+/g, ' ').trim();
+    const uniqueEmails = [...new Set((mainPage.emails || []).flat())];
+    const uniquePhones = [...new Set((mainPage.phones || []).flat())];
+
+    const result = {
+        company_url: baseUrl,
+        title: mainPage.title,
+        html: mainPage.html, // only homepage HTML
+        text: combinedText,   // all readable text combined
+        emails: uniqueEmails,
+        phones: uniquePhones
+    };
+
+    await Actor.pushData(result);
+    console.log(`✅ Scraped ${baseUrl} (${subpages.length} extra pages)`);
 }
 
-console.log(`✅ Done scraping ${results.length} pages total.`);
+// run
+for (const url of input.startUrls) {
+    await scrapeCompany(url);
+}
+
 await Actor.exit();
